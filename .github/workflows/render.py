@@ -159,3 +159,4 @@ if github_output:
         f.write(f"duration_seconds={DURATION}\n")
         f.write(f"final_size_mb={final_size_mb:.1f}\n")
         f.write(f"video_kbps={VIDEO_KBPS}\n")
+        
