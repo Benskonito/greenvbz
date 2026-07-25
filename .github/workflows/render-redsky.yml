@@ -11,32 +11,23 @@ jobs:
       has_work: ${{ steps.discover.outputs.has_work }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install deps
-        run: pip install gdown --break-system-packages
-      - name: Discover all images in Drive
+        with:
+          lfs: true
+      - name: Discover all images in repo
         id: discover
         run: |
-          python -c "
+          python3 -c "
           import json, os, sys
           from pathlib import Path
-          import gdown
-          REDSKYIMG_FOLDER = '1BvFlR82cNTxZYuzSuGqPaWgYMMJH4gr2'
-          TMP_DIR = Path('/tmp/discover_redsky')
-          TMP_DIR.mkdir(parents=True, exist_ok=True)
-          print('Downloading image folder to discover available images...')
-          try:
-              gdown.download_folder(id=REDSKYIMG_FOLDER, output=str(TMP_DIR), quiet=False)
-          except Exception as e:
-              print(f'ERROR: failed to download image folder: {e}', file=sys.stderr)
-              sys.exit(1)
+          IMAGES_DIR = Path('images')
           all_images = sorted(
-              p for p in TMP_DIR.rglob('*')
+              p for p in IMAGES_DIR.rglob('*')
               if p.suffix.lower() in ('.png', '.jpg', '.jpeg')
           )
           if not all_images:
-              print('ERROR: no images found in Drive folder after download.', file=sys.stderr)
+              print('ERROR: no images found in images/ folder.', file=sys.stderr)
               sys.exit(1)
-          print(f'Total images in Drive: {len(all_images)}')
+          print(f'Total images in repo: {len(all_images)}')
           for p in all_images:
               print(f'  - {p.name}')
           matrix = {'include': [{'image_name': p.name} for p in all_images]}
@@ -57,16 +48,17 @@ jobs:
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - name: Install deps
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg --fix-missing
-          pip install gdown --break-system-packages
       - name: Run render
         id: render
         env:
           TARGET_IMAGE_NAME: ${{ matrix.image_name }}
-        run: python render.py
+        run: python3 render.py
       - name: Determine REDSKY number
         id: redsky
         env:
@@ -98,28 +90,19 @@ jobs:
       - name: Show summary
         if: always()
         run: |
-          FOLDER_ID="1BvFlR82cNTxZYuzSuGqPaWgYMMJH4gr2"
-          STEM=$(echo "${{ matrix.image_name }}" | sed 's/\.[^.]*$//')
-          ID_FILE="/tmp/redsky/image_id_${STEM}.txt"
           echo "## 🖼️ ${{ steps.redsky.outputs.name }} — ${{ matrix.image_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Source filename:** \`${{ matrix.image_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Release file:** \`${{ steps.redsky.outputs.name }}.mp4\`" >> $GITHUB_STEP_SUMMARY
           echo "**Final size:** \`${{ steps.render.outputs.final_size_mb }} MB\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f "$ID_FILE" ]; then
-            FILE_ID=$(cat "$ID_FILE")
-            echo "![image preview](https://drive.google.com/uc?id=${FILE_ID}&export=view)" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "> Delete **\`${{ matrix.image_name }}\`** from your [Google Drive folder](https://drive.google.com/drive/folders/${FOLDER_ID}) after downloading." >> $GITHUB_STEP_SUMMARY
+          echo "![image preview](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/images/${{ matrix.image_name }})" >> $GITHUB_STEP_SUMMARY
       - name: Create GitHub Release with video
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.redsky.outputs.name }}
           name: "${{ steps.redsky.outputs.name }} (${{ steps.render.outputs.final_size_mb }} MB)"
           body: |
-            somewhere
             **Release:** ${{ steps.redsky.outputs.name }}
             **Source image:** ${{ matrix.image_name }}
             **Final size:** ${{ steps.render.outputs.final_size_mb }} MB
