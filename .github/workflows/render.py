@@ -35,9 +35,9 @@ DURATION = pick_duration()
 # File size budget (GitHub release asset limit is 2GB, so we stay under that
 # with margin). Because duration is now much shorter than before, this same
 # size budget naturally translates into a much higher, better-looking bitrate.
-MIN_SIZE_BYTES    = int(1.50 * 1024 ** 3)
-MAX_SIZE_BYTES    = int(1.99 * 1024 ** 3)
-TARGET_SIZE_BYTES = random.randint(int(1.55 * 1024 ** 3), int(1.90 * 1024 ** 3))
+MIN_SIZE_BYTES    = int(1.20 * 1024 ** 3)
+MAX_SIZE_BYTES    = int(1.90 * 1024 ** 3)
+TARGET_SIZE_BYTES = random.randint(int(1.25 * 1024 ** 3), int(1.85 * 1024 ** 3))
 AUDIO_BITRATE_K   = 128
 VIDEO_KBPS        = int((TARGET_SIZE_BYTES * 8) / DURATION / 1000) - AUDIO_BITRATE_K
 VIDEO_KBPS        = max(VIDEO_KBPS, 800)  # floor raised — short duration means quality shouldn't tank
@@ -57,7 +57,7 @@ output_path = TMP / f"OUT_{image_path.stem}.mp4"
 print(f"\n>>> IMAGE        : {image_path.name}")
 print(f">>> OUTPUT FRAME : {OUT_W}x{OUT_H} (16:9, crop-to-fill, 1080p)")
 print(f">>> DURATION     : {DURATION}s ({DURATION // 3600}h {(DURATION % 3600) // 60}m)")
-print(f">>> TARGET SIZE  : {TARGET_SIZE_BYTES / 1e9:.2f} GB (range 1.50-1.99 GB)")
+print(f">>> TARGET SIZE  : {TARGET_SIZE_BYTES / 1e9:.2f} GB (range 1.20-1.90 GB)")
 print(f">>> VIDEO BITRATE: {VIDEO_KBPS}k\n")
 
 songs = sorted(AUDIO_DIR.glob("*.mp3"))
@@ -92,11 +92,16 @@ total_playlist_len = sum(song_durations)
 print(f"\nTotal single-pass playlist length: {total_playlist_len:.1f}s")
 
 # Repeat the shuffled playlist enough times to cover DURATION with a safety
-# margin, so -shortest never truncates the video early due to running out
-# of audio.
-SAFETY_MARGIN = 1.15  # 15% extra buffer
+# margin, so audio always outlasts the video and never runs out before the
+# image loop ends (which would otherwise force an early cutoff via -shortest).
+SAFETY_MARGIN = 1.20  # 20% extra buffer
 repeats_needed = max(1, int((DURATION * SAFETY_MARGIN) // total_playlist_len) + 1)
 print(f"Playlist repeats: {repeats_needed}")
+
+# Fade the audio out over the last 5 seconds so it never gets hard-cut
+# mid-song when the video reaches its exact DURATION.
+AUDIO_FADE_SECONDS = 5
+fade_start = max(0, DURATION - AUDIO_FADE_SECONDS)
 
 concat_path = TMP / f"concat_{image_path.stem}.txt"
 with open(concat_path, "w") as f:
@@ -106,7 +111,8 @@ with open(concat_path, "w") as f:
 
 filter_complex = (
     f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-    f"crop={OUT_W}:{OUT_H},format=yuv420p[outv]"
+    f"crop={OUT_W}:{OUT_H},format=yuv420p[outv];"
+    f"[1:a]afade=t=out:st={fade_start}:d={AUDIO_FADE_SECONDS}[outa]"
 )
 cmd = [
     "ffmpeg", "-y",
@@ -115,7 +121,7 @@ cmd = [
     "-t", str(DURATION),
     "-filter_complex", filter_complex,
     "-map", "[outv]",
-    "-map", "1:a",
+    "-map", "[outa]",
     "-c:v", "libx264", "-preset", "ultrafast",
     "-b:v", f"{VIDEO_KBPS}k", "-maxrate", f"{VIDEO_KBPS}k", "-bufsize", f"{VIDEO_KBPS * 2}k",
     "-profile:v", "high", "-level", "4.1", "-r", "24", "-g", "48",
@@ -140,7 +146,7 @@ def size_watcher():
             gb = size / (1024 * 1024 * 1024)
             print(f"[SIZE] {output_path.name} -> {mb:.1f} MB ({gb:.3f} GB)", flush=True)
             if size >= MAX_SIZE_BYTES:
-                print("[SIZE] Hit 1.99 GB cap - stopping FFmpeg cleanly (SIGINT).", flush=True)
+                print("[SIZE] Hit 1.90 GB cap - stopping FFmpeg cleanly (SIGINT).", flush=True)
                 stopped_by_watcher = True
                 # SIGINT lets ffmpeg finish writing the moov atom / trailer
                 # cleanly, unlike SIGTERM which can leave the mp4 corrupt.
@@ -164,10 +170,10 @@ if proc.returncode not in (0, -2, -15):  # -2 = SIGINT, -15 = SIGTERM
 final_size = output_path.stat().st_size
 final_size_mb = final_size / (1024 * 1024)
 final_size_gb = final_size / (1024 * 1024 * 1024)
-stop_reason = "capped at 1.99 GB by size watcher" if stopped_by_watcher else "duration reached"
+stop_reason = "capped at 1.90 GB by size watcher" if stopped_by_watcher else "duration reached"
 
 if final_size < MIN_SIZE_BYTES:
-    print(f"[WARN] Output is only {final_size_gb:.3f} GB - below the 1.50 GB minimum target.")
+    print(f"[WARN] Output is only {final_size_gb:.3f} GB - below the 1.20 GB minimum target.")
 
 print(f"\nDONE - {output_path}")
 print(f"Stop reason  : {stop_reason}")
