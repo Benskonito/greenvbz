@@ -7,40 +7,33 @@ import time
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REPO_ROOT   = Path(__file__).resolve().parent
-IMAGES_DIR  = REPO_ROOT / "images"
-AUDIO_DIR   = REPO_ROOT / "audio"
-TMP         = Path("/tmp/redsky")
+REPO_ROOT      = Path(__file__).resolve().parent
+IMAGES_DIR     = REPO_ROOT / "images"
+AUDIO_DIR      = REPO_ROOT / "audio"
+ASSETS_DIR     = REPO_ROOT / "assets"
+SUBSCRIBE_PATH = ASSETS_DIR / "subscribe.mp4"   # <-- put your subscribe-button clip here
+TMP            = Path("/tmp/redsky")
 
-OUT_W, OUT_H = 1920, 1080  # 1080p — highest resolution target
+OUT_W, OUT_H = 1920, 1080  # always 1080p, no matter the source image size/ratio
 
-# ── Duration logic ───────────────────────────────────────────────────────────
-# Normal range: 1h20m (4800s) to 3h (10800s)
-# Rare extended range: 3h to 4h (10800s - 14400s), low probability
-# Hard cap: never exceeds 4h
-MIN_DURATION      = 80 * 60          # 1h20m = 4800s
-NORMAL_MAX        = 3 * 60 * 60      # 3h    = 10800s
-RARE_MAX          = 4 * 60 * 60      # 4h    = 14400s
-RARE_CHANCE       = 0.12             # ~12% of runs land in the 3h-4h "rare" zone
+# ── Duration: flat random 2h - 4h ────────────────────────────────────────────
+MIN_DURATION = 2 * 60 * 60   # 2h  = 7200s
+MAX_DURATION = 4 * 60 * 60   # 4h  = 14400s
 
 
 def pick_duration():
-    if random.random() < RARE_CHANCE:
-        return random.randint(NORMAL_MAX, RARE_MAX)
-    return random.randint(MIN_DURATION, NORMAL_MAX)
+    return random.randint(MIN_DURATION, MAX_DURATION)
 
 
 DURATION = pick_duration()
 
-# File size budget (GitHub release asset limit is 2GB, so we stay under that
-# with margin). Because duration is now much shorter than before, this same
-# size budget naturally translates into a much higher, better-looking bitrate.
+# ── File size budget: random 1.20GB - 1.90GB ─────────────────────────────────
 MIN_SIZE_BYTES    = int(1.20 * 1024 ** 3)
 MAX_SIZE_BYTES    = int(1.90 * 1024 ** 3)
 TARGET_SIZE_BYTES = random.randint(int(1.25 * 1024 ** 3), int(1.85 * 1024 ** 3))
 AUDIO_BITRATE_K   = 128
 VIDEO_KBPS        = int((TARGET_SIZE_BYTES * 8) / DURATION / 1000) - AUDIO_BITRATE_K
-VIDEO_KBPS        = max(VIDEO_KBPS, 800)  # floor raised — short duration means quality shouldn't tank
+VIDEO_KBPS        = max(VIDEO_KBPS, 800)  # floor so quality never tanks
 
 TARGET_IMAGE_NAME = os.environ.get("TARGET_IMAGE_NAME")
 if not TARGET_IMAGE_NAME:
@@ -70,7 +63,7 @@ for i, s in enumerate(songs):
 
 
 def probe_duration(path: Path) -> float:
-    """Get real duration of an audio file via ffprobe, instead of guessing."""
+    """Get real duration of a media file via ffprobe, instead of guessing."""
     try:
         out = subprocess.check_output(
             [
@@ -91,15 +84,10 @@ song_durations = [probe_duration(s) for s in songs]
 total_playlist_len = sum(song_durations)
 print(f"\nTotal single-pass playlist length: {total_playlist_len:.1f}s")
 
-# Repeat the shuffled playlist enough times to cover DURATION with a safety
-# margin, so audio always outlasts the video and never runs out before the
-# image loop ends (which would otherwise force an early cutoff via -shortest).
-SAFETY_MARGIN = 1.20  # 20% extra buffer
+SAFETY_MARGIN = 1.20
 repeats_needed = max(1, int((DURATION * SAFETY_MARGIN) // total_playlist_len) + 1)
 print(f"Playlist repeats: {repeats_needed}")
 
-# Fade the audio out over the last 5 seconds so it never gets hard-cut
-# mid-song when the video reaches its exact DURATION.
 AUDIO_FADE_SECONDS = 5
 fade_start = max(0, DURATION - AUDIO_FADE_SECONDS)
 
@@ -109,15 +97,78 @@ with open(concat_path, "w") as f:
         for s in songs:
             f.write(f"file '{s.resolve()}'\n")
 
-filter_complex = (
+# ── Subscribe-button overlay scheduling ──────────────────────────────────────
+SUB_MIN_GAP   = 4 * 60
+SUB_MAX_GAP   = 7 * 60
+SUB_WIDTH     = 340
+
+have_subscribe = SUBSCRIBE_PATH.exists()
+sub_duration = probe_duration(SUBSCRIBE_PATH) if have_subscribe else 0.0
+
+windows = []
+if have_subscribe and sub_duration > 0:
+    t = random.randint(SUB_MIN_GAP, SUB_MAX_GAP)
+    while t + sub_duration < DURATION - 5:
+        windows.append({
+            "start": t,
+            "end": t + sub_duration,
+            "corner": random.choice(["left", "right"]),
+            "margin": random.randint(30, 70),
+        })
+        t += sub_duration + random.randint(SUB_MIN_GAP, SUB_MAX_GAP)
+    print(f"\n>>> SUBSCRIBE OVERLAY: {len(windows)} appearances scheduled")
+    for w in windows:
+        mins = w["start"] // 60
+        secs = w["start"] % 60
+        print(f"    - at {mins}m{secs:02d}s ({w['corner']}, margin {w['margin']}px)")
+else:
+    print(f"\n>>> SUBSCRIBE OVERLAY: skipped (no file at {SUBSCRIBE_PATH})")
+
+
+def build_overlay_exprs(windows):
+    if not windows:
+        return None, None, None
+    x_chain = "0"
+    y_chain = "0"
+    enable_terms = []
+    for w in reversed(windows):
+        cond = f"between(t,{w['start']},{w['end']})"
+        if w["corner"] == "right":
+            xw = f"(W-w-{w['margin']}+8*sin(2*PI*t/2.3))"
+        else:
+            xw = f"({w['margin']}+8*sin(2*PI*t/2.3))"
+        yw = f"(H-h-{w['margin']}+6*cos(2*PI*t/1.9))"
+        x_chain = f"if({cond},{xw},{x_chain})"
+        y_chain = f"if({cond},{yw},{y_chain})"
+        enable_terms.append(cond)
+    enable_expr = f"gte({'+'.join(enable_terms)},1)"
+    return x_chain, y_chain, enable_expr
+
+
+x_expr, y_expr, enable_expr = build_overlay_exprs(windows)
+
+# ── Build ffmpeg filter graph ────────────────────────────────────────────────
+bg_chain = (
     f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
-    f"crop={OUT_W}:{OUT_H},format=yuv420p[outv];"
-    f"[1:a]afade=t=out:st={fade_start}:d={AUDIO_FADE_SECONDS}[outa]"
+    f"crop={OUT_W}:{OUT_H},format=yuv420p[bg]"
 )
-cmd = [
-    "ffmpeg", "-y",
-    "-loop", "1", "-i", str(image_path),
-    "-f", "concat", "-safe", "0", "-i", str(concat_path),
+audio_chain = f"[1:a]afade=t=out:st={fade_start}:d={AUDIO_FADE_SECONDS}[outa]"
+
+cmd = ["ffmpeg", "-y", "-loop", "1", "-i", str(image_path)]
+cmd += ["-f", "concat", "-safe", "0", "-i", str(concat_path)]
+
+if windows:
+    cmd += ["-stream_loop", "-1", "-i", str(SUBSCRIBE_PATH)]
+    filter_complex = (
+        f"{bg_chain};"
+        f"[2:v]scale={SUB_WIDTH}:-2,format=rgba,setsar=1[sub];"
+        f"[bg][sub]overlay=x='{x_expr}':y='{y_expr}':enable='{enable_expr}':eval=frame[outv];"
+        f"{audio_chain}"
+    )
+else:
+    filter_complex = f"{bg_chain};[bg]copy[outv];{audio_chain}"
+
+cmd += [
     "-t", str(DURATION),
     "-filter_complex", filter_complex,
     "-map", "[outv]",
@@ -148,8 +199,6 @@ def size_watcher():
             if size >= MAX_SIZE_BYTES:
                 print("[SIZE] Hit 1.90 GB cap - stopping FFmpeg cleanly (SIGINT).", flush=True)
                 stopped_by_watcher = True
-                # SIGINT lets ffmpeg finish writing the moov atom / trailer
-                # cleanly, unlike SIGTERM which can leave the mp4 corrupt.
                 proc.send_signal(signal.SIGINT)
                 try:
                     proc.wait(timeout=30)
@@ -164,7 +213,7 @@ watcher.start()
 proc.wait()
 watcher.join()
 
-if proc.returncode not in (0, -2, -15):  # -2 = SIGINT, -15 = SIGTERM
+if proc.returncode not in (0, -2, -15):
     raise SystemExit("FFmpeg failed - check output above.")
 
 final_size = output_path.stat().st_size
@@ -182,6 +231,7 @@ print(f"Frame        : {OUT_W}x{OUT_H}")
 print(f"Duration     : {DURATION}s ({DURATION // 3600}h {(DURATION % 3600) // 60}m)")
 print(f"Size         : {final_size_mb:.1f} MB ({final_size_gb:.3f} GB)")
 print(f"Image        : {image_path.name}")
+print(f"Subscribe overlay appearances: {len(windows)}")
 
 github_output = os.environ.get("GITHUB_OUTPUT")
 if github_output:
@@ -191,3 +241,4 @@ if github_output:
         f.write(f"duration_seconds={DURATION}\n")
         f.write(f"final_size_mb={final_size_mb:.1f}\n")
         f.write(f"video_kbps={VIDEO_KBPS}\n")
+        f.write(f"subscribe_appearances={len(windows)}\n")
